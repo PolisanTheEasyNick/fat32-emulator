@@ -89,6 +89,8 @@ unsigned char toupper(unsigned char input) { //converts char to uppercase; no ne
 
 int init(uint8_t* disk) {
 
+    //TODO: COUNT FS_FreeClusters = BPB_TotSec32 - (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) - 3;
+
     BPB_BytesPerSector = 0;
     BPB_SecPerCluster = 0;
     BPB_RsvdSecCnt = 0;
@@ -215,10 +217,8 @@ void writeFSInfSector(uint8_t *disk) {
     *(FSInfo_start+0x1E4+3) = 0x61;
 
     //last known number of free data clusters on the volume, FSI_Free_Count
-    *(FSInfo_start+0x1E8) = 0x5F;
-    *(FSInfo_start+0x1E8+1) = 0x9D;
-    *(FSInfo_start+0x1E8+2) = 0x00;
-    *(FSInfo_start+0x1E8+3) = 0x00;
+    uint32_t FS_FreeClusters = BPB_TotSec32 - (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) - 3;
+    memcpy(FSInfo_start+0x1E8, &FS_FreeClusters, 8);
 
     //number of most recently known to be allocated data cluster, FSI_Nxt_Free
     *(FSInfo_start+0x1EC) = 0x02;
@@ -237,11 +237,12 @@ void writeFSInfSector(uint8_t *disk) {
 
 uint32_t getFreeSector(uint8_t* disk) { //returns free sector offset in root; TODO: pass Cluster N
     uint32_t firstData = (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) * BPB_BytesPerSector;
-    printf("Start search address: 0x%x\n", firstData);
+    printf("Start search address for free sector: 0x%x\n", firstData);
     for(int sector = 0; sector < 16; sector++) { //16 for searching only in root dir for now
+        printf("Checking 0x%x\n", firstData + sector*32);
         if(*(disk + firstData + sector*32) == 0 || *(disk + firstData + sector*32) == 0xE5) { //if sector free or contain removed dir
             printf("Found available sector at offset: 0x%x\n", firstData + sector*32);
-            return firstData + sector*16;
+            return firstData + sector*32;
         }
     }
     printf("Not found available sector?");
@@ -249,7 +250,9 @@ uint32_t getFreeSector(uint8_t* disk) { //returns free sector offset in root; TO
 
 uint32_t getFreeCluster(uint8_t *disk) { //returns free cluster number
     uint32_t FirstDataSector = BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32);
-    for(int cluster = 0; cluster < (strlen(disk) / BPB_BytesPerSector) - FirstDataSector; cluster++) {
+    printf("Starting search of free cluster at 0x%x\n", FirstDataSector*BPB_BytesPerSector);
+    for(int cluster = 1; cluster < (strlen(disk) / BPB_BytesPerSector) - FirstDataSector; cluster++) { //sectors 0 and 1 are reserved
+        printf("Checking offset 0x%x\n", (FirstDataSector+cluster)*BPB_BytesPerSector);
         if(*(disk+(FirstDataSector+cluster)*BPB_BytesPerSector) == 0x0) { //if first cluster byte is zero it means it unused? TODO: add more checks like for 0xE5 and so on
             return cluster;
         }
@@ -280,6 +283,7 @@ void format(uint8_t* disk, unsigned int size) {
     memcpy(BS_VolLab, "NO NAME    ", sizeof(11));
     memcpy(BS_FilSysType, "FAT32   ", sizeof(8));
 
+
     memset(disk, 0, size);
 
     writeMBR(disk); //Master Boot Record
@@ -291,7 +295,7 @@ void format(uint8_t* disk, unsigned int size) {
     writeMBR(disk + BPB_BytesPerSector * BPB_BkBootSec);
     writeFSInfSector(disk + BPB_BytesPerSector * BPB_BkBootSec);  //A copy of the FSInfo sector is also there
 
-    //root?
+    //sectors 0 and 1 are in use
     *(disk+0x4000) = 0xF8;
     *(disk+0x4000+1) = 0xFF;
     *(disk+0x4000+2) = 0xFF;
@@ -434,39 +438,32 @@ void mkdir(FILE *image, uint8_t* disk, char *name) { //TODO: pass a dir
     clock_gettime(CLOCK_REALTIME, &current_time_spec);
 
     //calculate and write tenths
-    dir_entry.DIR_CrtTimeTenth = current_time_spec.tv_nsec / 1000000 / 10;
+    dir_entry.DIR_CrtTimeTenth = current_time_spec.tv_nsec / 10000000;
 
     time_t current_time_t;
-    struct tm *local_time;
+    struct tm *utc_time;
 
     time(&current_time_t);
-    local_time = localtime(&current_time_t);
+    utc_time = gmtime(&current_time_t);
 
-    int hours = local_time->tm_hour;
-    int minutes = local_time->tm_min;
-    int seconds = local_time->tm_sec;
+    uint8_t hours = utc_time->tm_hour;
+    uint8_t minutes = utc_time->tm_min;
+    uint8_t seconds = utc_time->tm_sec;
 
-    int year = local_time->tm_year + 1900; //year since 1900
-    int month = local_time->tm_mon + 1;    //month (0-11)
-    int day = local_time->tm_mday;         //day of the month
+    uint8_t year = utc_time->tm_year - 2000; //year since 2000
+    uint8_t month = utc_time->tm_mon + 1;    //month (0-11)
+    uint8_t day = utc_time->tm_mday;         //day of the month
 
-    dir_entry.DIR_CrtTime = seconds / 2; //Bit positions 0 through 4 contain elapsed seconds – as a count of 2-second increments
-    dir_entry.DIR_CrtTime <<= 5;
-    dir_entry.DIR_CrtTime |= minutes; //Bit positions 5 through 10 represent number of minutes
-    dir_entry.DIR_CrtTime <<= 4;
-    dir_entry.DIR_CrtTime |= hours; //Bit positions 11 through 15 represent hours
+    printf("Date: %d-%d-%d %d:%d:%d\n", year, month, day, hours, minutes, seconds);
 
+    dir_entry.DIR_CrtTime = (hours << 11) | minutes << 5 | (seconds / 2);
+    dir_entry.DIR_CrtDate = (year << 9) | (month << 5) | day;
 
-    dir_entry.DIR_CrtDate = day; //Bit positions 0 through 4 represent the day of the month
-    dir_entry.DIR_CrtDate <<= 4;
-    dir_entry.DIR_CrtDate |= month; //Bit positions 5 through 8 represent the month of the yea
-    dir_entry.DIR_CrtDate <<= 8;
-    dir_entry.DIR_CrtDate |= year; //Bit positions 9 through 15 are the count of years from 1980
 
     dir_entry.DIR_LstAccDate = dir_entry.DIR_CrtDate;
 
     uint32_t freeCluster = getFreeCluster(disk) + 2;
-    printf("Free cluster: %d\n", freeCluster);
+    printf("Free cluster: %d\n", freeCluster - 2);
 
     dir_entry.DIR_FstClusHI = (freeCluster >> 16) & 0xFFFF;
 
@@ -483,9 +480,9 @@ void mkdir(FILE *image, uint8_t* disk, char *name) { //TODO: pass a dir
     //creating directory entry at allocated cluster
     //documentation ????? exampling as mkdir created at mounted volume
     uint16_t first_data_sector = BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32);
-    uint16_t first_alloc_sector = ((freeCluster - 2) * BPB_SecPerCluster) + first_data_sector;
+    uint16_t first_alloc_sector = (freeCluster-2 * BPB_SecPerCluster) + first_data_sector;
     uint32_t first_alloc_offset = first_alloc_sector * BPB_BytesPerSector;
-    printf("Offset of %d sector: 0x%x\n", freeCluster, first_alloc_offset);
+    printf("Offset of %d sector: 0x%x\n", freeCluster-2, first_alloc_offset);
     dir_entry.DIR_NAME[0] = 0x2E;
     for(int i = 1; i < 11; i++) {
         dir_entry.DIR_NAME[i] = 0x20;
@@ -500,7 +497,19 @@ void mkdir(FILE *image, uint8_t* disk, char *name) { //TODO: pass a dir
     memcpy(disk+first_alloc_offset+32, &dir_entry, 32);
     printf("Writed 32 bytes dir allocation to 0x%x\n", first_alloc_offset+32);
 
+    //writing, that cluster freeCluster is in use
+    //TODO: value is link to next F6-02?
+    uint32_t inuse_endofchain_start = 0x0FFFFFF8;
+    uint32_t inuse_endofchait_end = 0x0FFFFFFF;
+    uint32_t inuse = 0xFFFFFFF0;
+    memcpy(disk+0x4000+(freeCluster-2)*8, &inuse_endofchain_start, 4); //in use(end of chain)
+    memcpy(disk+0x4000+(freeCluster-2)*8+4, &inuse_endofchait_end, 4);
 
+    //updating free clusters info
+    //do we need it at all?
+    // printf("Free clusters: %d\n", FS_FreeClusters);
+    // FS_FreeClusters--;
+    // writeFSInfSector(disk);
 
 }
 
@@ -550,6 +559,7 @@ int main()
     }
 
     mkdir(image, disk, "The quick brown.fox");
+    mkdir(image, disk, "test");
 
     if(fwrite(disk, 1, 20971520, image) != 20971520) {
         perror("Error writing image");
