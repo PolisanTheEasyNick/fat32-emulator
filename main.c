@@ -354,10 +354,41 @@ uint8_t isSFN(char *name) { //is given filename is 8.3 filename
     return 1;
 }
 
-void mkdir(FILE *image, uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
+//counts how many same files with given shortname in specified cluster
+//shortname must be with "~1" (like created in mkdir func)
+uint32_t count_shortnames(uint8_t* disk, uint8_t* shortname, uint32_t cluster) {
+    uint32_t firstData = (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) * BPB_BytesPerSector;
+    if(cluster != 0)
+        firstData += (cluster - 2) * BPB_SecPerCluster * BPB_BytesPerSector;
+
+    uint32_t count = 0;
+    for(int sector = 0; sector < BPB_BytesPerSector / 32; sector++) {
+        uint8_t is_same = 1;
+        for(int i = 0; i < 6; i++) { //comparing start of shortname
+            if(*(disk+firstData+sector*32+i) != shortname[i]) {
+                is_same = 0;
+                break;
+            }
+        }
+
+        if(!is_same) continue;
+
+        for(int i = 8; i < 11; i++) { //comparing end of shortname
+            if(*(disk+firstData+sector*32+i) != shortname[i]) {
+                is_same = 0;
+                break;
+            }
+        }
+
+        if(is_same) count++;
+    }
+    return count;
+}
+
+void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
     int len = strlen(name);
     //creating shortname
-    unsigned char shortname[11];
+    uint8_t shortname[11];
     //TODO: More 8.3 format transforms https://en.wikipedia.org/wiki/8.3_filename
 
     if(len > 11) { //then need to split by ~1 "the quick brown fox" -> "THEQUI~1FOX"
@@ -369,8 +400,15 @@ void mkdir(FILE *image, uint8_t* disk, char *name, uint32_t parent_cluster, uint
             else
                 shortname[i] = toupper(name[sym++]);
         }
-        shortname[6] = 0x7E; //~ ,TODO: calculations for ~1, ~2 and so on
-        shortname[7] = 0x31; //1
+        uint8_t count_of_shortnames = count_shortnames(disk, shortname, parent_cluster) + 1;
+        if(count_of_shortnames < 10) {
+            shortname[6] = 0x7E;
+            shortname[7] = count_of_shortnames + 0x30; //+0x30 means adding '0' from ASCII
+        } else {
+            shortname[5] = 0x7E;
+            shortname[6] = (count_of_shortnames / 10) + 0x30;
+            shortname[7] = (count_of_shortnames % 10) + 0x30;
+        }
         for(int j = 8, i = len-3; j < 11; i++) {
             shortname[j++] = toupper(name[i]);
         }
@@ -397,7 +435,6 @@ void mkdir(FILE *image, uint8_t* disk, char *name, uint32_t parent_cluster, uint
 
     //Folder will consist from LDir entries + short dir entry if shortname is not 8.3 uppercase
     uint32_t free_sector = getFreeSector(disk, parent_cluster); //get free sector to where we can write new folder
-
     if(!isSFN(name)) {
         int num_entries = (len + 12) / 13; //alculate the number of entries needed
         int remaining_chars = len; //keep track of remaining characters to process
@@ -596,8 +633,8 @@ int main()
         return -1;
     }
 
-    mkdir(image, disk, "The quick brown.fox", 0, 0);
-    mkdir(image, disk, "TEST", 3, 1);
+    mkdir(disk, "The quick brown.fox", 0, 0);
+    mkdir(disk, "The quick brown.fox", 0, 0);
 
     if(fwrite(disk, 1, 20971520, image) != 20971520) {
         perror("Error writing image");
