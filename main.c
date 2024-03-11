@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h> //for intxx_t
@@ -7,6 +8,8 @@
 // https://www.pjrc.com/tech/8051/ide/fat32.html
 // https://academy.cba.mit.edu/classes/networking_communications/SD/FAT.pdf
 // http://elm-chan.org/docs/fat_e.html
+
+uint8_t verbose_level = 1; //print all info, TODO: change by args argv
 
 uint16_t BPB_BytesPerSector = 0; //Bytes Per Sector, must be 512
 uint8_t BPB_SecPerCluster = 0; //Sectors Per Cluster
@@ -70,7 +73,18 @@ struct DirectoryFAT32 {
 
 };
 
-unsigned char ChkSum (unsigned char *pFcbName) //Microsoft's function for checksum generation, 7.2 of Microsoft FAT Specification
+void log(uint8_t level, const char *message, ...) {
+    //0 - DEBUG
+    //1 - ERROR
+    if(level == verbose_level) {
+        va_list args;
+        va_start(args, message);
+        vprintf(message, args);
+        va_end(args);
+    }
+}
+
+unsigned char ChkSum(unsigned char *pFcbName) //Microsoft's function for checksum generation, 7.2 of Microsoft FAT Specification
 {
     short FcbNameLen;
     unsigned char Sum;
@@ -87,6 +101,25 @@ unsigned char toupper(unsigned char input) { //converts char to uppercase; no ne
         return input - 0x20;
     else
         return input;
+}
+
+uint8_t contains_space(const char *name) {
+    for(int i = 0; i < strlen(name); i++) {
+        if(name[i] == 0x20) return 1;
+    }
+    return 0;
+}
+
+//function for removing trailing spaces from shortname
+uint8_t * parse_shortname(uint8_t *shortname) {
+    uint8_t last_symbol = 0;
+    for(int i = 0; i < 11; i++) {
+        if(shortname[i] != 0x20) last_symbol = i;
+    }
+    for(int i = last_symbol+1; i < 11; i++)
+        shortname[i] = '\0';
+    return shortname;
+
 }
 
 int init(uint8_t* disk) {
@@ -113,24 +146,24 @@ int init(uint8_t* disk) {
     BPB_BytesPerSector |= *(disk + 0x0B + 1);
     BPB_BytesPerSector <<= 8;
     BPB_BytesPerSector |= *(disk + 0x0B);
-    printf("Bytes Per Sector: %d\n", BPB_BytesPerSector);
+    log(0, "Bytes Per Sector: %d\n", BPB_BytesPerSector);
     if(BPB_BytesPerSector != 512) {
-        printf("Bytes Per Sector NOT 512! Aborting.\n");
+        log(0, "Bytes Per Sector NOT 512! Aborting.\n");
         return -1;
     }
 
     BPB_SecPerCluster |= *(disk + 0x0D);
-    printf("Sectors Per Cluster: %d\n", BPB_SecPerCluster);
+    log(0, "Sectors Per Cluster: %d\n", BPB_SecPerCluster);
 
     BPB_RsvdSecCnt |= *(disk + 0x0E + 1);
     BPB_RsvdSecCnt <<= 8;
     BPB_RsvdSecCnt |= *(disk + 0x0E);
-    printf("Number of Reserved Sectors: %d\n", BPB_RsvdSecCnt);
+    log(0, "Number of Reserved Sectors: %d\n", BPB_RsvdSecCnt);
 
     BPB_NumFATs |= *(disk + 0x10);
-    printf("Number of FATs: %d\n", BPB_NumFATs);
+    log(0, "Number of FATs: %d\n", BPB_NumFATs);
     if(BPB_NumFATs != 2) {
-        printf("Number of FATs NOT 2! Aborting.\n");
+        log(0, "Number of FATs NOT 2! Aborting.\n");
         return -2;
     }
 
@@ -142,7 +175,7 @@ int init(uint8_t* disk) {
     BPB_FATSz32 |= *(disk + 0x24 + 1);
     BPB_FATSz32 <<= 8;
     BPB_FATSz32 |= *(disk + 0x24);
-    printf("Sectors Per FAT: %d\n", BPB_FATSz32);
+    log(0, "Sectors Per FAT: %d\n", BPB_FATSz32);
 
     BPB_RootClus |= *(disk + 0x2C + 3);
     BPB_RootClus <<= 8;
@@ -151,19 +184,19 @@ int init(uint8_t* disk) {
     BPB_RootClus |= *(disk + 0x2C + 1);
     BPB_RootClus <<= 8;
     BPB_RootClus |= *(disk + 0x2C);
-    printf("Root Directory First Cluster: 0x%x\n", BPB_RootClus);
+    log(0, "Root Directory First Cluster: 0x%x\n", BPB_RootClus);
 
     unsigned short signature = 0;
     signature |= *(disk + 0x1FE);
     signature <<= 8;
     signature |= *(disk + 0x1FE + 1);
-    printf("Signature: 0x%x\n", signature);
+    log(0, "Signature: 0x%x\n", signature);
     if(signature != 0x55AA) {
-        printf("Signature NOT 0x55AA! Aborting.\n");
+        log(0, "Signature NOT 0x55AA! Aborting.\n");
         return -3;
     }
 
-    printf("MBR check-up successfully completed!\n");
+    log(0, "MBR check-up successfully completed!\n");
     return 0;
 }
 
@@ -241,22 +274,22 @@ uint32_t getFreeSector(uint8_t* disk, uint32_t cluster) { //returns free sector 
     uint32_t firstData = (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) * BPB_BytesPerSector;
     if(cluster != 0)
         firstData += (cluster - 2) * BPB_SecPerCluster * BPB_BytesPerSector;
-    printf("Start search address for free sector: 0x%x\n", firstData);
+    log(0, "Start search address for free sector: 0x%x\n", firstData);
     for(int sector = 0; sector < 16; sector++) { //16 for searching only in root dir for now
-        printf("Checking 0x%x\n", firstData + sector*32);
+        log(0, "Checking 0x%x\n", firstData + sector*32);
         if(*(disk + firstData + sector*32) == 0 || *(disk + firstData + sector*32) == 0xE5) { //if sector free or contain removed dir
-            printf("Found available sector at offset: 0x%x\n", firstData + sector*32);
+            log(0, "Found available sector at offset: 0x%x\n", firstData + sector*32);
             return firstData + sector*32;
         }
     }
-    printf("Not found available sector?");
+    log(0, "Not found available sector?");
 }
 
 uint32_t getFreeCluster(uint8_t *disk) { //returns free cluster number
     uint32_t FirstDataSector = BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32);
-    printf("Starting search of free cluster at 0x%x\n", FirstDataSector*BPB_BytesPerSector);
+    log(0, "Starting search of free cluster at 0x%x\n", FirstDataSector*BPB_BytesPerSector);
     for(int cluster = 1; cluster < (strlen(disk) / BPB_BytesPerSector) - FirstDataSector; cluster++) { //sectors 0 and 1 are reserved
-        printf("Checking offset 0x%x\n", (FirstDataSector+cluster)*BPB_BytesPerSector);
+        log(0, "Checking offset 0x%x\n", (FirstDataSector+cluster)*BPB_BytesPerSector);
         if(*(disk+(FirstDataSector+cluster)*BPB_BytesPerSector) == 0x0) { //if first cluster byte is zero it means it unused? TODO: add more checks like for 0xE5 and so on
             return cluster;
         }
@@ -315,14 +348,6 @@ void format(uint8_t* disk, unsigned int size) {
     *(disk+0x4000+11) = 0x0F;
 }
 
-void printBinaryWithZeros(uint32_t num) {
-    int i;
-    for (i = 31; i >= 0; --i) {
-        putchar('0' + ((num >> i) & 1));
-    }
-    printf("\n");
-}
-
 uint8_t isSFN(char *name) { //is given filename is 8.3 filename
     int len = strlen(name);
     if(len > 11) return 0;
@@ -341,8 +366,6 @@ uint8_t isSFN(char *name) { //is given filename is 8.3 filename
                 return 0;
             dot_index = 1;
         }
-
-
     }
 
     if(dots_count == 1) { //means that filename extension is present
@@ -427,7 +450,7 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
 
     //basic validations of name
     if(len > 255) {
-        printf("Error! Name length can't be more 255. Aborting.\n");
+        log(1, "Error! Name length can't be more 255. Aborting.\n");
         return;
     }
 
@@ -456,7 +479,7 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
                 }
             }
 
-            printf("LDIR entry %d: %s\n", i + 1, entry);
+            log(0, "LDIR entry %d: %s\n", i + 1, entry);
             remaining_chars -= 13;
 
             //creating LDIR entry
@@ -496,7 +519,7 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
 
             //writing long dir entry into disk
             memcpy(disk+free_sector, &ldir_entry, 32);
-            printf("Writed 32 bytes LDir to 0x%x\n", free_sector);
+            log(0, "Writed 32 bytes LDir to 0x%x\n", free_sector);
             free_sector+=32; //32 bytes writed, so go to the next sector
         }
     }
@@ -531,7 +554,7 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
     uint8_t month = utc_time->tm_mon + 1;    //month (0-11)
     uint8_t day = utc_time->tm_mday;         //day of the month
 
-    printf("Date: %d-%d-%d %d:%d:%d\n", year, month, day, hours, minutes, seconds);
+    log(0, "Date: %d-%d-%d %d:%d:%d\n", year+2000, month, day, hours, minutes, seconds);
 
     dir_entry.DIR_CrtTime = (hours << 11) | minutes << 5 | (seconds / 2);
     dir_entry.DIR_CrtDate = (year << 9) | (month << 5) | day;
@@ -540,7 +563,7 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
     dir_entry.DIR_LstAccDate = dir_entry.DIR_CrtDate;
 
     uint32_t freeCluster = getFreeCluster(disk) + 2;
-    printf("Free cluster: %d\n", freeCluster - 2);
+    log(0, "Free cluster: %d\n", freeCluster - 2);
 
     dir_entry.DIR_FstClusHI = (freeCluster >> 16) & 0xFFFF;
 
@@ -552,26 +575,26 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
 
     //writing dir entry into disk
     memcpy(disk+free_sector, &dir_entry, 32);
-    printf("Writed 32 bytes dir to 0x%x\n", free_sector);
+    log(0, "Writed 32 bytes dir to 0x%x\n", free_sector);
 
     //creating . and .. folders
     uint16_t first_data_sector = BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32);
     uint16_t first_alloc_sector = (freeCluster-2 * BPB_SecPerCluster) + first_data_sector;
     uint32_t first_alloc_offset = first_alloc_sector * BPB_BytesPerSector;
-    printf("Offset of %d sector: 0x%x\n", freeCluster-2, first_alloc_offset);
+    log(0, "Offset of %d sector: 0x%x\n", freeCluster-2, first_alloc_offset);
     dir_entry.DIR_NAME[0] = 0x2E; //'.'
     for(int i = 1; i < 11; i++) {
         dir_entry.DIR_NAME[i] = 0x20;
     }
     memcpy(disk+first_alloc_offset, &dir_entry, 32);
-    printf("Writed 32 bytes dir allocation to 0x%x\n", first_alloc_offset);
+    log(0, "Writed 32 bytes dir allocation to 0x%x\n", first_alloc_offset);
 
     dir_entry.DIR_NAME[1] = 0x2E; //'..'
     dir_entry.DIR_FstClusHI = (parent_cluster >> 16) & 0xFFFF;
     dir_entry.DIR_FstClusLO = parent_cluster & 0xFFFF;
 
     memcpy(disk+first_alloc_offset+32, &dir_entry, 32);
-    printf("Writed 32 bytes dir allocation to 0x%x\n", first_alloc_offset+32);
+    log(0, "Writed 32 bytes dir allocation to 0x%x\n", first_alloc_offset+32);
 
     //writing, that cluster freeCluster is in use
     //TODO: value is link to next F6-02?
@@ -582,21 +605,133 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
     memcpy(disk+0x4000+(freeCluster-2)*8+4, &inuse_endofchait_end, 4);
 
     //updating free clusters info
-    printf("Free clusters: %d\n", FS_FreeClusters);
+    log(0, "Free clusters: %d\n", FS_FreeClusters);
     FS_FreeClusters--;
     writeFSInfSector(disk);
 
 }
 
-int main()
+void ls(uint8_t *disk, uint32_t cluster) {
+    printf(". .. ");
+    uint32_t firstData = (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) * BPB_BytesPerSector;
+    if(cluster != 0)
+        firstData += (cluster - 2) * BPB_SecPerCluster * BPB_BytesPerSector;
+
+    for(int sector = 0; sector < BPB_BytesPerSector / 32; sector++) {
+        uint32_t offset = firstData+sector*32;
+        uint8_t LFN[256], chars_N = 0;
+
+        //if sector is not free and not removed
+        if(*(disk+offset + 11) == ATTR_LONG_NAME) { //means we are at LDir entry
+            if(*(disk+offset) != 0x0 || *(disk+offset) != 0xE5) {
+                struct LDirectoryFAT32 ldir_entry;
+                uint8_t entry_num = 1;
+
+                offset = firstData+sector*32;
+
+                //another memcpy call by price of additional order checks
+                memcpy(&ldir_entry, disk+offset, 32);
+                uint8_t order = (ldir_entry.LDIR_Ord & ~0x40);
+                do {
+                    offset = firstData+sector*32;
+                    memcpy(&ldir_entry, disk+offset, 32);
+                    if((ldir_entry.LDIR_Ord & ~0x40) != order--) {
+                        log(1, "WARNING: Wrong order of Long Directory Name! read: %d, must be: %d. Skipping sector\n", (ldir_entry.LDIR_Ord & 0x40), order);
+                        sector++;
+                        continue;
+                    }
+
+                    //parsing name
+                    uint8_t current_symbol = 0;
+                    for(int symbol = 0; symbol < 10; symbol+=2) {
+                        if(ldir_entry.LDIR_Name1[symbol] != 0xFF && ldir_entry.LDIR_Name1[symbol] != 0x0)
+                            LFN[current_symbol++] = ldir_entry.LDIR_Name1[symbol];
+                    }
+
+                    for(int symbol = 0; symbol < 12; symbol+=2) {
+                        if(ldir_entry.LDIR_Name2[symbol] != 0xFF && ldir_entry.LDIR_Name2[symbol] != 0x0)
+                            LFN[current_symbol++] = ldir_entry.LDIR_Name2[symbol];
+                    }
+
+                    for(int symbol = 0; symbol < 4; symbol+=2) {
+                        if(ldir_entry.LDIR_Name3[symbol] != 0xFF && ldir_entry.LDIR_Name3[symbol] != 0x0)
+                            LFN[current_symbol++] = ldir_entry.LDIR_Name3[symbol];
+                    }
+
+                    sector++;
+                    chars_N += current_symbol;
+                    if(ldir_entry.LDIR_Ord != 1) {
+                        for (int i = 255; i >= 0; i--) { //making space for another 13 symbols
+                            if (i >= 13) {
+                                LFN[i] = LFN[i - 13];
+                            }
+                        }
+                    }
+                }
+                while(order != 0);
+                LFN[chars_N] = '\0';
+                log(0, "Found Ldir name: %s\n", LFN);
+
+                struct DirectoryFAT32 dir_entry;
+                offset = firstData+sector*32;
+                memcpy(&dir_entry, disk+offset, 32);
+                if(contains_space(LFN))
+                    printf("\'%s\' ", LFN);
+                else
+                    printf("%s ", LFN);
+
+            }
+        } else if(*(disk+offset + 11) == ATTR_DIRECTORY) {
+            if(*(disk+offset) != 0x0 || *(disk+offset) != 0xE5) {
+                struct DirectoryFAT32 dir_entry;
+                offset = firstData+sector*32;
+                memcpy(&dir_entry, disk+offset, 32);
+                log(0, "Found dir name: %s\n", dir_entry.DIR_NAME);
+                parse_shortname(dir_entry.DIR_NAME);
+                if(contains_space(dir_entry.DIR_NAME))
+                    printf("\'%s\' ", dir_entry.DIR_NAME);
+                else
+                    printf("%s ", dir_entry.DIR_NAME);
+            }
+        } else if(*(disk+offset + 11) == 0) { //means file or empty cluster))
+            if(*(disk+offset) != 0x0 || *(disk+offset) != 0xE5) {
+                struct DirectoryFAT32 dir_entry;
+                offset = firstData+sector*32;
+                memcpy(&dir_entry, disk+offset, 32);
+                parse_shortname(dir_entry.DIR_NAME);
+                if(dir_entry.DIR_NAME[0]) {
+                    log(0, "Found file name: %s\n", dir_entry.DIR_NAME);
+                    if(contains_space(dir_entry.DIR_NAME))
+                        printf("\'%s\' ", dir_entry.DIR_NAME);
+                    else
+                        printf("%s ", dir_entry.DIR_NAME);
+                }
+            }
+        }
+    }
+
+}
+
+int main(int argc, char *argv[])
 {
+
+    if (argc > 1) {
+        // Convert the command-line argument to an integer
+        verbose_level = atoi(argv[1]);
+
+        // Ensure that verbose_level is either 0 or 1
+        verbose_level = (verbose_level != 0) ? 1 : 0;
+    }
+
+    //todo add proper CLI parameters like -v --verbose -f --file
+
     FILE *image = fopen("/home/ob3r0n/fat32.disk", "wb");
     if(!image) {
         perror("Error opening image!\n");
         //create then..
         return -1;
     }
-    printf("Image opened successfully!\n");
+    log(0, "Image opened successfully!\n");
 
     uint8_t *disk = malloc(20971520);
 
@@ -616,13 +751,13 @@ int main()
         perror("Error reading image");
         return -1;
     }
-    printf("Image readed successfully!\n");
+    log(0, "Image readed successfully!\n");
 
     init(disk);
 
     uint16_t FirstDataSector = BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32);
-    printf("First data sector: %d\n", FirstDataSector);
-    printf("Address: 0x%x\n", FirstDataSector * BPB_BytesPerSector);
+    log(0, "First data sector: %d\n", FirstDataSector);
+    log(0, "Address: 0x%x\n", FirstDataSector * BPB_BytesPerSector);
 
     fclose(image);
 
@@ -633,8 +768,12 @@ int main()
         return -1;
     }
 
-    mkdir(disk, "The quick brown.fox", 0, 0);
-    mkdir(disk, "The quick brown.fox", 0, 0);
+    mkdir(disk, "The quick brown fox and some long for another sector name", 0, 0);
+    mkdir(disk, "TEST", 0, 0);
+    mkdir(disk, "file", 0, 1);
+    mkdir(disk, "FILE", 0, 1);
+
+    ls(disk, 0);
 
     if(fwrite(disk, 1, 20971520, image) != 20971520) {
         perror("Error writing image");
