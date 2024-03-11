@@ -4,6 +4,7 @@
 #include <stdint.h> //for intxx_t
 #include <string.h> //memset
 #include <time.h>
+#include <getopt.h>
 
 // https://www.pjrc.com/tech/8051/ide/fat32.html
 // https://academy.cba.mit.edu/classes/networking_communications/SD/FAT.pdf
@@ -75,7 +76,7 @@ struct DirectoryFAT32 {
 
 void log(uint8_t level, const char *message, ...) {
     //0 - DEBUG
-    //1 - ERROR
+    //1 - ERROR ONLY
     if(level == verbose_level) {
         va_list args;
         va_start(args, message);
@@ -111,7 +112,7 @@ uint8_t contains_space(const char *name) {
 }
 
 //function for removing trailing spaces from shortname
-uint8_t * parse_shortname(uint8_t *shortname) {
+uint8_t *parse_shortname(uint8_t *shortname) {
     uint8_t last_symbol = 0;
     for(int i = 0; i < 11; i++) {
         if(shortname[i] != 0x20) last_symbol = i;
@@ -123,9 +124,6 @@ uint8_t * parse_shortname(uint8_t *shortname) {
 }
 
 int init(uint8_t* disk) {
-
-    //TODO: COUNT FS_FreeClusters = BPB_TotSec32 - (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) - 3;
-
     BPB_BytesPerSector = 0;
     BPB_SecPerCluster = 0;
     BPB_RsvdSecCnt = 0;
@@ -167,6 +165,16 @@ int init(uint8_t* disk) {
         return -2;
     }
 
+    BPB_Media = *(disk + 21);
+
+    BPB_TotSec32 |= *(disk + 32 + 3);
+    BPB_TotSec32 <<= 8;
+    BPB_TotSec32 |= *(disk + 32 + 2);
+    BPB_TotSec32 <<= 8;
+    BPB_TotSec32 |= *(disk + 32 + 1);
+    BPB_TotSec32 <<= 8;
+    BPB_TotSec32 |= *(disk + 32);
+    log(0, "Total sectors: %d\n", BPB_TotSec32);
 
     BPB_FATSz32 |= *(disk + 0x24 + 3);
     BPB_FATSz32 <<= 8;
@@ -177,6 +185,17 @@ int init(uint8_t* disk) {
     BPB_FATSz32 |= *(disk + 0x24);
     log(0, "Sectors Per FAT: %d\n", BPB_FATSz32);
 
+
+    BPB_ExtFlags |= *(disk + 40 + 1);
+    BPB_ExtFlags <<= 8;
+    BPB_ExtFlags |= *(disk + 40);
+    log(0, "Ext flags: 0x%x\n", BPB_ExtFlags);
+
+    BPB_FSVer |= *(disk + 42 + 1);
+    BPB_FSVer <<= 8;
+    BPB_FSVer |= *(disk + 42);
+    log(0, "FS Version: 0x%x\n", BPB_ExtFlags);
+
     BPB_RootClus |= *(disk + 0x2C + 3);
     BPB_RootClus <<= 8;
     BPB_RootClus |= *(disk + 0x2C + 2);
@@ -185,6 +204,16 @@ int init(uint8_t* disk) {
     BPB_RootClus <<= 8;
     BPB_RootClus |= *(disk + 0x2C);
     log(0, "Root Directory First Cluster: 0x%x\n", BPB_RootClus);
+
+    BPB_FSInfo |= *(disk + 48 + 1);
+    BPB_FSInfo <<= 8;
+    BPB_FSInfo |= *(disk + 48);
+    log(0, "FS Info sector: %d\n", BPB_FSInfo);
+
+    BPB_BkBootSec |= *(disk + 50 + 1);
+    BPB_BkBootSec <<= 8;
+    BPB_BkBootSec |= *(disk + 50);
+    log(0, "Backup Boot Sector: %d\n", BPB_BkBootSec);
 
     unsigned short signature = 0;
     signature |= *(disk + 0x1FE);
@@ -195,6 +224,8 @@ int init(uint8_t* disk) {
         log(0, "Signature NOT 0x55AA! Aborting.\n");
         return -3;
     }
+
+    FS_FreeClusters = BPB_TotSec32 - (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) - 1;
 
     log(0, "MBR check-up successfully completed!\n");
     return 0;
@@ -709,73 +740,161 @@ void ls(uint8_t *disk, uint32_t cluster) {
             }
         }
     }
+    printf("\n");
 
+}
+
+void print_help() {
+    printf("Available commands:\n\n");
+    printf("cd <path> - changes the current directory to specified directory. Only absolute path is allowed.");
+    printf("format - creates FAT32 filesystem inside the file\n");
+    printf("ls [path] - shows the files and directories inside a given directory, or in the current directory af a path is not specified.\n");
+    printf("mkdir <name> - creates a directory with a given name in the current directory.\n");
+    printf("touch <name> - creates a file with a given name in the current directory.\n");
+    printf("rm <name> - removes specified file or directory in current directory.\n");
 }
 
 int main(int argc, char *argv[])
 {
+    char *file_path = NULL;
+    int size = 20971520;
+    static struct option long_options[] = {
+        {"file",    required_argument, 0, 'f'},
+        {"verbose", no_argument,       0, 'v'},
+        {"size",    optional_argument, 0, 's'},
+        {0, 0, 0, 0}
+    };
 
-    if (argc > 1) {
-        // Convert the command-line argument to an integer
-        verbose_level = atoi(argv[1]);
-
-        // Ensure that verbose_level is either 0 or 1
-        verbose_level = (verbose_level != 0) ? 1 : 0;
+    if (argc <= 2) {
+        fprintf(stderr, "Usage: %s [-f <file>] [-v] [-s [<size>]]\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
 
-    //todo add proper CLI parameters like -v --verbose -f --file
+    int opt;
+    while ((opt = getopt_long(argc, argv, "vf:s:", long_options, NULL)) != -1) {
+        switch (opt) {
+        case 'f':
+            file_path = optarg;
+            break;
+        case 'v':
+            verbose_level = 0;
+            break;
+        case 's':
+            if (optarg) {
+                size = atoi(optarg);
+            }
+            break;
+        default:
+            fprintf(stderr, "Usage: %s [-f <file>] [-v] [-s [<size>]]\n", argv[0]);
+            exit(EXIT_FAILURE);
+        }
+    }
 
-    FILE *image = fopen("/home/ob3r0n/fat32.disk", "wb");
+
+    if (file_path == NULL) {
+        fprintf(stderr, "Error: File path not provided.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (verbose_level == 0) {
+        printf("Verbose mode enabled.\n");
+    }
+
+    FILE *image = fopen(file_path, "rb");
     if(!image) {
-        perror("Error opening image!\n");
-        //create then..
-        return -1;
+        perror("Error opening image! Creating!\n");
+        FILE *new_image = fopen(file_path, "wb");
+        uint8_t *disk = malloc(size);
+        memset(disk, 0, size);
+        fwrite(disk, 1, size, new_image);
+        fclose(new_image);
+        free(disk);
     }
     log(0, "Image opened successfully!\n");
 
-    uint8_t *disk = malloc(20971520);
+    uint8_t *disk = malloc(size);
 
-    format(disk, 20971520);
-    fwrite(disk, 1, 20971520, image);
-    fclose(image);
-
-    image = fopen("/home/ob3r0n/fat32.disk", "rb");
-    if(!image) {
-        perror("Error opening image:");
-        //create then..
-        free(disk);
-        return -1;
-    }
-
-    if(fread(disk, 1, 20971520, image) != 20971520) {
-        perror("Error reading image");
-        return -1;
-    }
+    int readed = fread(disk, 1, size, image);
+    if(readed != size) {
+        log(0, "Error reading image! Creating new.\n");
+        FILE *new_image = fopen(file_path, "wb");
+        uint8_t *disk = malloc(size);
+        memset(disk, 0, size);
+        fwrite(disk, 1, size, new_image);
+        fclose(new_image);
+    }   
     log(0, "Image readed successfully!\n");
 
-    init(disk);
-
-    uint16_t FirstDataSector = BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32);
-    log(0, "First data sector: %d\n", FirstDataSector);
-    log(0, "Address: 0x%x\n", FirstDataSector * BPB_BytesPerSector);
-
     fclose(image);
+    image = fopen(file_path, "wb");
 
-    image = fopen("/home/ob3r0n/fat32.disk", "wb");
-    if(!image) {
-        perror("Error opening image!\n");
-        //create then..
-        return -1;
+    uint32_t current_cluster = 0;
+    uint8_t *current_folder;
+    current_folder = malloc(1);
+    current_folder[0] = '/';
+
+    uint8_t is_initialized = 0;
+
+    if(init(disk) == 0) is_initialized = 1;
+
+    while(1) {
+        printf("/>");
+        char input[128];
+        fgets(input, 128, stdin);
+        input[strcspn(input, "\n")] = '\0';
+        char *command = strtok(input, " ");
+        if(strcmp(command, "ls") == 0) {
+            if(!is_initialized) {
+                printf("Unknown disk format.\n");
+                continue;
+            }
+            ls(disk, current_cluster);
+        } else if(strcmp(command, "cd") == 0) {
+            if(!is_initialized) {
+                printf("Unknown disk format.\n");
+                continue;
+            }
+            char *directory = strtok(NULL, " ");
+
+        } else if(strcmp(command, "format") == 0) {
+            format(disk, size);
+            is_initialized = 1;
+        } else if(strcmp(command, "mkdir") == 0) {
+            if(!is_initialized) {
+                printf("Unknown disk format.\n");
+                continue;
+            }
+            char *directory = strtok(NULL, " ");
+            mkdir(disk, directory, current_cluster, 0);
+            if(fwrite(disk, 1, size, image) != size) {
+                perror("Error writing image");
+            }
+        } else if(strcmp(command, "touch") == 0) {
+            if(!is_initialized) {
+                printf("Unknown disk format.\n");
+                continue;
+            }
+            char *directory = strtok(NULL, " ");
+            printf("File name: %s\n", directory);
+            mkdir(disk, directory, current_cluster, 1);
+            if(fwrite(disk, 1, size, image) != size) {
+                perror("Error writing image");
+            }
+        } else if(strcmp(command, "help") == 0) {
+            print_help();
+        } else if(strcmp(command, "quit") == 0) {
+            printf("Bye!\n");
+            break;
+        } else if(strcmp(command, "") == 0){
+            //do nothing
+        } else {
+            print_help();
+        }
     }
 
-    mkdir(disk, "The quick brown fox and some long for another sector name", 0, 0);
-    mkdir(disk, "TEST", 0, 0);
-    mkdir(disk, "file", 0, 1);
-    mkdir(disk, "FILE", 0, 1);
+    free(current_folder);
 
-    ls(disk, 0);
-
-    if(fwrite(disk, 1, 20971520, image) != 20971520) {
+    if(fwrite(disk, 1, size, image) != size) {
         perror("Error writing image");
     }
 
