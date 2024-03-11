@@ -15,6 +15,8 @@ uint8_t BPB_NumFATs = 0; //Number of FAT's, must be 2
 uint8_t BPB_Media = 0; //0xF8 standart for non-removable media, 0xF0 for removable
 uint32_t BPB_TotSec32 = 0; //count of sectors on the volume
 
+uint32_t FS_FreeClusters = 0;
+
 //FAT32-only fields
 uint32_t BPB_FATSz32 = 0; //Sectors Per FAT
 uint16_t BPB_ExtFlags = 0; //must be 0 if mirroring is disabled
@@ -217,7 +219,7 @@ void writeFSInfSector(uint8_t *disk) {
     *(FSInfo_start+0x1E4+3) = 0x61;
 
     //last known number of free data clusters on the volume, FSI_Free_Count
-    uint32_t FS_FreeClusters = BPB_TotSec32 - (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) - 3;
+    //FS_FreeClusters = BPB_TotSec32 - (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) - 3;
     memcpy(FSInfo_start+0x1E8, &FS_FreeClusters, 8);
 
     //number of most recently known to be allocated data cluster, FSI_Nxt_Free
@@ -235,8 +237,10 @@ void writeFSInfSector(uint8_t *disk) {
     *(FSInfo_start+0x1FC+3) = 0xAA;
 }
 
-uint32_t getFreeSector(uint8_t* disk) { //returns free sector offset in root; TODO: pass Cluster N
+uint32_t getFreeSector(uint8_t* disk, uint32_t cluster) { //returns free sector offset in root;
     uint32_t firstData = (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) * BPB_BytesPerSector;
+    if(cluster != 0)
+        firstData += (cluster - 2) * BPB_SecPerCluster * BPB_BytesPerSector;
     printf("Start search address for free sector: 0x%x\n", firstData);
     for(int sector = 0; sector < 16; sector++) { //16 for searching only in root dir for now
         printf("Checking 0x%x\n", firstData + sector*32);
@@ -283,6 +287,7 @@ void format(uint8_t* disk, unsigned int size) {
     memcpy(BS_VolLab, "NO NAME    ", sizeof(11));
     memcpy(BS_FilSysType, "FAT32   ", sizeof(8));
 
+    FS_FreeClusters = BPB_TotSec32 - (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) - 1;
 
     memset(disk, 0, size);
 
@@ -318,7 +323,38 @@ void printBinaryWithZeros(uint32_t num) {
     printf("\n");
 }
 
-void mkdir(FILE *image, uint8_t* disk, char *name) { //TODO: pass a dir
+uint8_t isSFN(char *name) { //is given filename is 8.3 filename
+    int len = strlen(name);
+    if(len > 11) return 0;
+    int dots_count = 0; //8.3 specifies that filename MUST NOT contain more than one '.'
+    int dot_index = -1;
+    for(int i = 0; i < len; i++) {
+        if(name[i] >= 97 && name[i] <= 122) //if name contain lowercase char
+            return 0;
+
+        if(name[i] == ' ') //if name contain space character
+            return 0;
+
+        if(name[i] == '.') {
+            dots_count++;
+            if(dots_count > 1)
+                return 0;
+            dot_index = 1;
+        }
+
+
+    }
+
+    if(dots_count == 1) { //means that filename extension is present
+        if((len - dot_index) < 1 || (len - dot_index) > 3) { //means filename extension is NOT 1-3 charachers in length
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+void mkdir(FILE *image, uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
     int len = strlen(name);
     //creating shortname
     unsigned char shortname[11];
@@ -333,7 +369,7 @@ void mkdir(FILE *image, uint8_t* disk, char *name) { //TODO: pass a dir
             else
                 shortname[i] = toupper(name[sym++]);
         }
-        shortname[6] = 0x7E; //~
+        shortname[6] = 0x7E; //~ ,TODO: calculations for ~1, ~2 and so on
         shortname[7] = 0x31; //1
         for(int j = 8, i = len-3; j < 11; i++) {
             shortname[j++] = toupper(name[i]);
@@ -341,7 +377,7 @@ void mkdir(FILE *image, uint8_t* disk, char *name) { //TODO: pass a dir
     } else {
         for(int i = 0; i < 11; i++) {
             if(i < len) {
-                shortname[i] = toupper(name[i]);
+                shortname[i] = name[i];
             } else {
                 shortname[i] = 0x20;
             }
@@ -360,77 +396,81 @@ void mkdir(FILE *image, uint8_t* disk, char *name) { //TODO: pass a dir
     //TODO: do checks for restricted symbols for shortname
 
     //Folder will consist from LDir entries + short dir entry if shortname is not 8.3 uppercase
-    uint32_t free_sector = getFreeSector(disk); //get free sector to where we can write new folder
+    uint32_t free_sector = getFreeSector(disk, parent_cluster); //get free sector to where we can write new folder
 
-    //TODO check first if we even need LDir at all
-    int num_entries = (len + 12) / 13; //alculate the number of entries needed
-    int remaining_chars = len; //keep track of remaining characters to process
-    for (int i = num_entries - 1; i >= 0; i--) {
-        //converting name into LDirName, Section 7 of Microsoft FAT Specification
-        char entry[13];
+    if(!isSFN(name)) {
+        int num_entries = (len + 12) / 13; //alculate the number of entries needed
+        int remaining_chars = len; //keep track of remaining characters to process
+        for (int i = num_entries - 1; i >= 0; i--) {
+            //converting name into LDirName, Section 7 of Microsoft FAT Specification
+            char entry[13];
 
-        strncpy(entry, name + (i * 13), 13);
+            strncpy(entry, name + (i * 13), 13);
 
-        { //block for not storing memory for "writed" variable for long time
-            short writed = 0; //write 0x00 0x00 at end of name
-            for (int j = 0; j < 13; j++) {
-                if(entry[j] == 0) {
-                    entry[j] = 0xFF;
-                    if(writed++ < 2)
-                        entry[j] = 0x00;
+            { //block for not storing memory for "writed" variable for long time
+                short writed = 0; //write 0x00 0x00 at end of name
+                for (int j = 0; j < 13; j++) {
+                    if(entry[j] == 0) {
+                        entry[j] = 0xFF;
+                        if(writed++ < 2)
+                            entry[j] = 0x00;
+                    }
+
                 }
-
             }
+
+            printf("LDIR entry %d: %s\n", i + 1, entry);
+            remaining_chars -= 13;
+
+            //creating LDIR entry
+            struct LDirectoryFAT32 ldir_entry;
+            if(i+1 == num_entries) {
+                ldir_entry.LDIR_Ord = num_entries | 0x40; //7.1 Spec, Nth member must contain a value N | LAST_LONG_ENTRY (0x40)
+            } else {
+                ldir_entry.LDIR_Ord = i+1;
+            }
+
+            for(int j = 0; j < 10; j+=2) { //adding symbols to LDIR_Name1
+                ldir_entry.LDIR_Name1[j] = entry[j/2];
+                if(ldir_entry.LDIR_Name1[j] != 0xFF)
+                    ldir_entry.LDIR_Name1[j+1] = 0; //because LDir names in Unicode, so 2 bytes for char
+                else ldir_entry.LDIR_Name1[j+1] = 0xFF;
+            }
+
+            ldir_entry.LDIR_Attr = ATTR_LONG_NAME;
+            ldir_entry.LDIR_Type = 0;
+            ldir_entry.LDIR_Chksum = checksum;
+
+            for(int j = 0, symb = 5; j < 11; j+=2) { //adding symbols to LDIR_Name2
+                ldir_entry.LDIR_Name2[j] = entry[symb++];
+                if(ldir_entry.LDIR_Name2[j] != 0xFF)
+                    ldir_entry.LDIR_Name2[j+1] = 0; //because LDir names in Unicode, so 2 bytes for char
+                else ldir_entry.LDIR_Name2[j+1] = 0xFF;
+            }
+
+            ldir_entry.LDIR_FstClusLO = 0;
+
+            for(int j = 0, symb = 11; j < 4; j+=2) { //adding symbols to LDIR_Name3
+                ldir_entry.LDIR_Name3[j] = entry[symb++];
+                if(ldir_entry.LDIR_Name3[j] != 0xFF)
+                    ldir_entry.LDIR_Name3[j+1] = 0; //because LDir names in Unicode, so 2 bytes for char
+                else ldir_entry.LDIR_Name3[j+1] = 0xFF;
+            }
+
+            //writing long dir entry into disk
+            memcpy(disk+free_sector, &ldir_entry, 32);
+            printf("Writed 32 bytes LDir to 0x%x\n", free_sector);
+            free_sector+=32; //32 bytes writed, so go to the next sector
         }
-
-        printf("LDIR entry %d: %s\n", i + 1, entry);
-        remaining_chars -= 13;
-
-        //creating LDIR entry
-        struct LDirectoryFAT32 ldir_entry;
-        if(i+1 == num_entries) {
-            ldir_entry.LDIR_Ord = num_entries | 0x40; //7.1 Spec, Nth member must contain a value N | LAST_LONG_ENTRY (0x40)
-        } else {
-            ldir_entry.LDIR_Ord = i+1;
-        }
-
-        for(int j = 0; j < 10; j+=2) { //adding symbols to LDIR_Name1
-            ldir_entry.LDIR_Name1[j] = entry[j/2];
-            if(ldir_entry.LDIR_Name1[j] != 0xFF)
-                ldir_entry.LDIR_Name1[j+1] = 0; //because LDir names in Unicode, so 2 bytes for char
-            else ldir_entry.LDIR_Name1[j+1] = 0xFF;
-        }
-
-        ldir_entry.LDIR_Attr = ATTR_LONG_NAME;
-        ldir_entry.LDIR_Type = 0;
-        ldir_entry.LDIR_Chksum = checksum;
-
-        for(int j = 0, symb = 5; j < 11; j+=2) { //adding symbols to LDIR_Name2
-            ldir_entry.LDIR_Name2[j] = entry[symb++];
-            if(ldir_entry.LDIR_Name2[j] != 0xFF)
-                ldir_entry.LDIR_Name2[j+1] = 0; //because LDir names in Unicode, so 2 bytes for char
-            else ldir_entry.LDIR_Name2[j+1] = 0xFF;
-        }
-
-        ldir_entry.LDIR_FstClusLO = 0;
-
-        for(int j = 0, symb = 11; j < 4; j+=2) { //adding symbols to LDIR_Name3
-            ldir_entry.LDIR_Name3[j] = entry[symb++];
-            if(ldir_entry.LDIR_Name3[j] != 0xFF)
-                ldir_entry.LDIR_Name3[j+1] = 0; //because LDir names in Unicode, so 2 bytes for char
-            else ldir_entry.LDIR_Name3[j+1] = 0xFF;
-        }
-
-        //writing long dir entry into disk
-        memcpy(disk+free_sector, &ldir_entry, 32);
-        printf("Writed 32 bytes LDir to 0x%x\n", free_sector);
-        free_sector+=32; //32 bytes writed, so go to the next sector
     }
 
     //adding short directory entry
     struct DirectoryFAT32 dir_entry;
     memcpy(dir_entry.DIR_NAME, shortname, 11);
-    dir_entry.DIR_ATTR = ATTR_DIRECTORY;
+    if(isFile)
+        dir_entry.DIR_ATTR = 0;
+    else
+        dir_entry.DIR_ATTR = ATTR_DIRECTORY;
     dir_entry.DIR_NTRes = 0;
 
     //getting current time
@@ -477,22 +517,21 @@ void mkdir(FILE *image, uint8_t* disk, char *name) { //TODO: pass a dir
     memcpy(disk+free_sector, &dir_entry, 32);
     printf("Writed 32 bytes dir to 0x%x\n", free_sector);
 
-    //creating directory entry at allocated cluster
-    //documentation ????? exampling as mkdir created at mounted volume
+    //creating . and .. folders
     uint16_t first_data_sector = BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32);
     uint16_t first_alloc_sector = (freeCluster-2 * BPB_SecPerCluster) + first_data_sector;
     uint32_t first_alloc_offset = first_alloc_sector * BPB_BytesPerSector;
     printf("Offset of %d sector: 0x%x\n", freeCluster-2, first_alloc_offset);
-    dir_entry.DIR_NAME[0] = 0x2E;
+    dir_entry.DIR_NAME[0] = 0x2E; //'.'
     for(int i = 1; i < 11; i++) {
         dir_entry.DIR_NAME[i] = 0x20;
     }
     memcpy(disk+first_alloc_offset, &dir_entry, 32);
     printf("Writed 32 bytes dir allocation to 0x%x\n", first_alloc_offset);
 
-    dir_entry.DIR_NAME[1] = 0x2E;
-    dir_entry.DIR_FstClusHI = 0;
-    dir_entry.DIR_FstClusLO = 0;
+    dir_entry.DIR_NAME[1] = 0x2E; //'..'
+    dir_entry.DIR_FstClusHI = (parent_cluster >> 16) & 0xFFFF;
+    dir_entry.DIR_FstClusLO = parent_cluster & 0xFFFF;
 
     memcpy(disk+first_alloc_offset+32, &dir_entry, 32);
     printf("Writed 32 bytes dir allocation to 0x%x\n", first_alloc_offset+32);
@@ -506,10 +545,9 @@ void mkdir(FILE *image, uint8_t* disk, char *name) { //TODO: pass a dir
     memcpy(disk+0x4000+(freeCluster-2)*8+4, &inuse_endofchait_end, 4);
 
     //updating free clusters info
-    //do we need it at all?
-    // printf("Free clusters: %d\n", FS_FreeClusters);
-    // FS_FreeClusters--;
-    // writeFSInfSector(disk);
+    printf("Free clusters: %d\n", FS_FreeClusters);
+    FS_FreeClusters--;
+    writeFSInfSector(disk);
 
 }
 
@@ -548,7 +586,7 @@ int main()
     uint16_t FirstDataSector = BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32);
     printf("First data sector: %d\n", FirstDataSector);
     printf("Address: 0x%x\n", FirstDataSector * BPB_BytesPerSector);
-    getFreeSector(disk);
+
     fclose(image);
 
     image = fopen("/home/ob3r0n/fat32.disk", "wb");
@@ -558,8 +596,8 @@ int main()
         return -1;
     }
 
-    mkdir(image, disk, "The quick brown.fox");
-    mkdir(image, disk, "test");
+    mkdir(image, disk, "The quick brown.fox", 0, 0);
+    mkdir(image, disk, "TEST", 3, 1);
 
     if(fwrite(disk, 1, 20971520, image) != 20971520) {
         perror("Error writing image");
