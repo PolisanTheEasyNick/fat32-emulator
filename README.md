@@ -7,7 +7,7 @@ This emulator program can manage FAT32 filesystem backed up by a file.
 ```bash
 $ cmake .
 $ make
-$ ./FAT32-emulator -f fat32.disk
+$ ./fat32-emulator -f fat32.disk
 ```
 
 ## Command line parameters
