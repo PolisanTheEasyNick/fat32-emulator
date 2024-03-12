@@ -10,8 +10,12 @@
 // https://academy.cba.mit.edu/classes/networking_communications/SD/FAT.pdf
 // http://elm-chan.org/docs/fat_e.html
 
-uint8_t verbose_level = 1; //print all info, TODO: change by args argv
+uint8_t verbose_level = 1; //0 - print all info, 1 - print errors only
 
+
+/************************
+ ***    Boot fields   ***
+ ************************/
 uint16_t BPB_BytesPerSector = 0; //Bytes Per Sector, must be 512
 uint8_t BPB_SecPerCluster = 0; //Sectors Per Cluster
 uint16_t BPB_RsvdSecCnt = 0; //Number of Reserved Sectors, usually 0x20
@@ -46,6 +50,9 @@ enum {
     ATTR_LONG_NAME_DIRECTORY = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID | ATTR_DIRECTORY |  ATTR_ARCHIVE //why do i need it?
 };
 
+/*********************************
+ ***    Long directory Entry   ***
+ *********************************/
 struct LDirectoryFAT32 {
     uint8_t LDIR_Ord; //Order of this entry
     uint8_t LDIR_Name1[10]; //Characters 1 to 5, portion of the long name
@@ -57,7 +64,9 @@ struct LDirectoryFAT32 {
     uint8_t LDIR_Name3[4]; //characters 12 and 13
 };
 
-
+/**********************************
+ ***    Short directory Entry   ***
+ **********************************/
 struct DirectoryFAT32 {
     unsigned char DIR_NAME[11]; //Short Name
     uint8_t DIR_ATTR; //File attributes
@@ -74,6 +83,10 @@ struct DirectoryFAT32 {
 
 };
 
+
+/************************
+ *** Helper functions ***
+ ************************/
 void log(uint8_t level, const char *message, ...) {
     //0 - DEBUG
     //1 - ERROR ONLY
@@ -123,6 +136,18 @@ uint8_t *parse_shortname(uint8_t *shortname) {
 
 }
 
+void print_help() {
+    printf("Available commands:\n\n");
+    printf("cd <path> - changes the current directory to specified directory. Only absolute path is allowed.");
+    printf("format - creates FAT32 filesystem inside the file\n");
+    printf("ls [path] - shows the files and directories inside a given directory, or in the current directory af a path is not specified.\n");
+    printf("mkdir <name> - creates a directory with a given name in the current directory.\n");
+    printf("touch <name> - creates a file with a given name in the current directory.\n");
+    printf("rm <name> - removes specified file or directory in current directory.\n");
+}
+
+
+//initializing boot sector fields
 int init(uint8_t* disk) {
     BPB_BytesPerSector = 0;
     BPB_SecPerCluster = 0;
@@ -138,8 +163,6 @@ int init(uint8_t* disk) {
     BPB_BkBootSec = 0;
     BS_DrvNum = 0;
     BS_BootSig = 0;
-
-    //TODO: read and print all FAT32 information??
 
     BPB_BytesPerSector |= *(disk + 0x0B + 1);
     BPB_BytesPerSector <<= 8;
@@ -231,6 +254,7 @@ int init(uint8_t* disk) {
     return 0;
 }
 
+//Boot sector writer
 void writeMBR(uint8_t *disk) {
     //Dummy jump instruction, BS_jmpBoot
     // *disk = 0xEB;
@@ -266,6 +290,7 @@ void writeMBR(uint8_t *disk) {
     *((uint16_t*)(disk+0x1FE)) = 0xAA55;
 }
 
+//File System Information sector writer
 void writeFSInfSector(uint8_t *disk) {
     uint8_t *FSInfo_start = disk+0x200;
     //RRaA sector signature, FSI_LeadSig
@@ -301,12 +326,13 @@ void writeFSInfSector(uint8_t *disk) {
     *(FSInfo_start+0x1FC+3) = 0xAA;
 }
 
-uint32_t getFreeSector(uint8_t* disk, uint32_t cluster) { //returns free sector offset in root;
+//returns free sector offset in given cluster;
+uint32_t getFreeSector(uint8_t* disk, uint32_t cluster) {
     uint32_t firstData = (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) * BPB_BytesPerSector;
     if(cluster != 0)
         firstData += (cluster - 2) * BPB_SecPerCluster * BPB_BytesPerSector;
     log(0, "Start search address for free sector: 0x%x\n", firstData);
-    for(int sector = 0; sector < 16; sector++) { //16 for searching only in root dir for now
+    for(int sector = 0; sector < 16; sector++) {
         log(0, "Checking 0x%x\n", firstData + sector*32);
         if(*(disk + firstData + sector*32) == 0 || *(disk + firstData + sector*32) == 0xE5) { //if sector free or contain removed dir
             log(0, "Found available sector at offset: 0x%x\n", firstData + sector*32);
@@ -316,12 +342,13 @@ uint32_t getFreeSector(uint8_t* disk, uint32_t cluster) { //returns free sector 
     log(0, "Not found available sector?");
 }
 
-uint32_t getFreeCluster(uint8_t *disk) { //returns free cluster number
+//returns free cluster number
+uint32_t getFreeCluster(uint8_t *disk) {
     uint32_t FirstDataSector = BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32);
     log(0, "Starting search of free cluster at 0x%x\n", FirstDataSector*BPB_BytesPerSector);
-    for(int cluster = 1; cluster < (strlen(disk) / BPB_BytesPerSector) - FirstDataSector; cluster++) { //sectors 0 and 1 are reserved
+    for(int cluster = 1; cluster < (strlen((const char*)disk) / BPB_BytesPerSector) - FirstDataSector; cluster++) { //sectors 0 and 1 are reserved
         log(0, "Checking offset 0x%x\n", (FirstDataSector+cluster)*BPB_BytesPerSector);
-        if(*(disk+(FirstDataSector+cluster)*BPB_BytesPerSector) == 0x0) { //if first cluster byte is zero it means it unused? TODO: add more checks like for 0xE5 and so on
+        if(*(disk+(FirstDataSector+cluster)*BPB_BytesPerSector) == 0x0 || *(disk+(FirstDataSector+cluster)*BPB_BytesPerSector) == 0xE5) {
             return cluster;
         }
     }
@@ -439,43 +466,43 @@ uint32_t count_shortnames(uint8_t* disk, uint8_t* shortname, uint32_t cluster) {
     return count;
 }
 
+uint8_t *convert_to_shortname(const char *name) {
+    uint8_t *shortname = malloc(11); // Short name buffer
+    memset(shortname, 0x20, 11); // Fill short name buffer with spaces
+
+    // Remove leading spaces
+    while (*name == ' ')
+        name++;
+
+    // Count the number of characters before the first dot (if any)
+    int main_len = 0;
+    while (name[main_len] != '.' && name[main_len] != '\0' && main_len < 8)
+        main_len++;
+
+    // Copy the main part of the name
+    for (int i = 0; i < main_len; i++)
+        shortname[i] = toupper(name[i]);
+
+    // Check if there is an extension
+    if (name[main_len] == '.') {
+        // Skip the dot
+        main_len++;
+
+        // Copy the extension part of the name
+        for (int i = 8; i < 11 && name[main_len] != '\0'; i++) {
+            shortname[i] = toupper(name[main_len]);
+            main_len++;
+        }
+    }
+
+    return shortname;
+}
 void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
     int len = strlen(name);
     //creating shortname
-    uint8_t shortname[11];
-    //TODO: More 8.3 format transforms https://en.wikipedia.org/wiki/8.3_filename
+    uint8_t *shortname = convert_to_shortname(name);
 
-    if(len > 11) { //then need to split by ~1 "the quick brown fox" -> "THEQUI~1FOX"
-        for(int i = 0, sym = 0; i < 6; i++) {
-            if(name[sym] == 0x20) {
-                sym++;
-                i--;
-            }
-            else
-                shortname[i] = toupper(name[sym++]);
-        }
-        uint8_t count_of_shortnames = count_shortnames(disk, shortname, parent_cluster) + 1;
-        if(count_of_shortnames < 10) {
-            shortname[6] = 0x7E;
-            shortname[7] = count_of_shortnames + 0x30; //+0x30 means adding '0' from ASCII
-        } else {
-            shortname[5] = 0x7E;
-            shortname[6] = (count_of_shortnames / 10) + 0x30;
-            shortname[7] = (count_of_shortnames % 10) + 0x30;
-        }
-        for(int j = 8, i = len-3; j < 11; i++) {
-            shortname[j++] = toupper(name[i]);
-        }
-    } else {
-        for(int i = 0; i < 11; i++) {
-            if(i < len) {
-                shortname[i] = name[i];
-            } else {
-                shortname[i] = 0x20;
-            }
 
-        }
-    }
 
     unsigned char checksum = ChkSum(shortname);
 
@@ -558,6 +585,7 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
     //adding short directory entry
     struct DirectoryFAT32 dir_entry;
     memcpy(dir_entry.DIR_NAME, shortname, 11);
+    free(shortname);
     if(isFile)
         dir_entry.DIR_ATTR = 0;
     else
@@ -584,8 +612,6 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
     uint8_t year = utc_time->tm_year - 2000; //year since 2000
     uint8_t month = utc_time->tm_mon + 1;    //month (0-11)
     uint8_t day = utc_time->tm_mday;         //day of the month
-
-    log(0, "Date: %d-%d-%d %d:%d:%d\n", year+2000, month, day, hours, minutes, seconds);
 
     dir_entry.DIR_CrtTime = (hours << 11) | minutes << 5 | (seconds / 2);
     dir_entry.DIR_CrtDate = (year << 9) | (month << 5) | day;
@@ -642,15 +668,47 @@ void mkdir(uint8_t* disk, char *name, uint32_t parent_cluster, uint8_t isFile) {
 
 }
 
+//parses part of LDir name and if not last part then creates space for another 13 symbols
+uint8_t *parseLDIRName(struct LDirectoryFAT32 ldir_entry) {
+    //parsing name
+    uint8_t *LFN, chars_N = 0;
+    LFN = malloc(256);
+    uint8_t current_symbol = 0;
+    for(int symbol = 0; symbol < 10; symbol+=2) {
+        if(ldir_entry.LDIR_Name1[symbol] != 0xFF && ldir_entry.LDIR_Name1[symbol] != 0x0)
+            LFN[current_symbol++] = ldir_entry.LDIR_Name1[symbol];
+    }
+
+    for(int symbol = 0; symbol < 12; symbol+=2) {
+        if(ldir_entry.LDIR_Name2[symbol] != 0xFF && ldir_entry.LDIR_Name2[symbol] != 0x0)
+            LFN[current_symbol++] = ldir_entry.LDIR_Name2[symbol];
+    }
+
+    for(int symbol = 0; symbol < 4; symbol+=2) {
+        if(ldir_entry.LDIR_Name3[symbol] != 0xFF && ldir_entry.LDIR_Name3[symbol] != 0x0)
+            LFN[current_symbol++] = ldir_entry.LDIR_Name3[symbol];
+    }
+
+    chars_N += current_symbol;
+    if(ldir_entry.LDIR_Ord != 1) {
+        for (int i = 255; i >= 0; i--) { //making space for another 13 symbols
+            if (i >= 13) {
+                LFN[i] = LFN[i - 13];
+            }
+        }
+    }
+    LFN[chars_N] = '\0';
+    return LFN;
+}
+
 void ls(uint8_t *disk, uint32_t cluster) {
-    printf(". .. ");
     uint32_t firstData = (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) * BPB_BytesPerSector;
     if(cluster != 0)
         firstData += (cluster - 2) * BPB_SecPerCluster * BPB_BytesPerSector;
 
     for(int sector = 0; sector < BPB_BytesPerSector / 32; sector++) {
         uint32_t offset = firstData+sector*32;
-        uint8_t LFN[256], chars_N = 0;
+        uint8_t *LFN;
 
         //if sector is not free and not removed
         if(*(disk+offset + 11) == ATTR_LONG_NAME) { //means we are at LDir entry
@@ -671,45 +729,22 @@ void ls(uint8_t *disk, uint32_t cluster) {
                         sector++;
                         continue;
                     }
-
-                    //parsing name
-                    uint8_t current_symbol = 0;
-                    for(int symbol = 0; symbol < 10; symbol+=2) {
-                        if(ldir_entry.LDIR_Name1[symbol] != 0xFF && ldir_entry.LDIR_Name1[symbol] != 0x0)
-                            LFN[current_symbol++] = ldir_entry.LDIR_Name1[symbol];
-                    }
-
-                    for(int symbol = 0; symbol < 12; symbol+=2) {
-                        if(ldir_entry.LDIR_Name2[symbol] != 0xFF && ldir_entry.LDIR_Name2[symbol] != 0x0)
-                            LFN[current_symbol++] = ldir_entry.LDIR_Name2[symbol];
-                    }
-
-                    for(int symbol = 0; symbol < 4; symbol+=2) {
-                        if(ldir_entry.LDIR_Name3[symbol] != 0xFF && ldir_entry.LDIR_Name3[symbol] != 0x0)
-                            LFN[current_symbol++] = ldir_entry.LDIR_Name3[symbol];
-                    }
-
+                    LFN = parseLDIRName(ldir_entry);
                     sector++;
-                    chars_N += current_symbol;
-                    if(ldir_entry.LDIR_Ord != 1) {
-                        for (int i = 255; i >= 0; i--) { //making space for another 13 symbols
-                            if (i >= 13) {
-                                LFN[i] = LFN[i - 13];
-                            }
-                        }
-                    }
+
                 }
                 while(order != 0);
-                LFN[chars_N] = '\0';
+
                 log(0, "Found Ldir name: %s\n", LFN);
 
                 struct DirectoryFAT32 dir_entry;
                 offset = firstData+sector*32;
                 memcpy(&dir_entry, disk+offset, 32);
-                if(contains_space(LFN))
+                if(contains_space((const char*)LFN))
                     printf("\'%s\' ", LFN);
                 else
                     printf("%s ", LFN);
+                free(LFN);
 
             }
         } else if(*(disk+offset + 11) == ATTR_DIRECTORY) {
@@ -719,7 +754,7 @@ void ls(uint8_t *disk, uint32_t cluster) {
                 memcpy(&dir_entry, disk+offset, 32);
                 log(0, "Found dir name: %s\n", dir_entry.DIR_NAME);
                 parse_shortname(dir_entry.DIR_NAME);
-                if(contains_space(dir_entry.DIR_NAME))
+                if(contains_space((const char*)dir_entry.DIR_NAME))
                     printf("\'%s\' ", dir_entry.DIR_NAME);
                 else
                     printf("%s ", dir_entry.DIR_NAME);
@@ -732,7 +767,7 @@ void ls(uint8_t *disk, uint32_t cluster) {
                 parse_shortname(dir_entry.DIR_NAME);
                 if(dir_entry.DIR_NAME[0]) {
                     log(0, "Found file name: %s\n", dir_entry.DIR_NAME);
-                    if(contains_space(dir_entry.DIR_NAME))
+                    if(contains_space((const char*)dir_entry.DIR_NAME))
                         printf("\'%s\' ", dir_entry.DIR_NAME);
                     else
                         printf("%s ", dir_entry.DIR_NAME);
@@ -744,14 +779,82 @@ void ls(uint8_t *disk, uint32_t cluster) {
 
 }
 
-void print_help() {
-    printf("Available commands:\n\n");
-    printf("cd <path> - changes the current directory to specified directory. Only absolute path is allowed.");
-    printf("format - creates FAT32 filesystem inside the file\n");
-    printf("ls [path] - shows the files and directories inside a given directory, or in the current directory af a path is not specified.\n");
-    printf("mkdir <name> - creates a directory with a given name in the current directory.\n");
-    printf("touch <name> - creates a file with a given name in the current directory.\n");
-    printf("rm <name> - removes specified file or directory in current directory.\n");
+//returns number of cluster where located folder with given name which located in given cluster
+uint32_t get_folder_cluster(uint8_t *disk, uint32_t cluster, char *name) {
+    if(!name) {
+        log(0, "ERROR: Name not given!\n");
+        return -1;
+    }
+    uint32_t firstData = (BPB_RsvdSecCnt + (BPB_NumFATs * BPB_FATSz32)) * BPB_BytesPerSector;
+    if(cluster != 0)
+        firstData += (cluster - 2) * BPB_SecPerCluster * BPB_BytesPerSector;
+
+    for(int sector = 0; sector < BPB_BytesPerSector / 32; sector++) {
+        uint32_t offset = firstData+sector*32;
+        uint8_t *LFN;
+
+        //if sector is not free and not removed
+        if(*(disk+offset + 11) == ATTR_LONG_NAME) { //means we are at LDir entry
+            if(*(disk+offset) != 0x0 || *(disk+offset) != 0xE5) {
+                struct LDirectoryFAT32 ldir_entry;
+                uint8_t entry_num = 1;
+
+                offset = firstData+sector*32;
+
+                //another memcpy call by price of additional order checks
+                memcpy(&ldir_entry, disk+offset, 32);
+                uint8_t order = (ldir_entry.LDIR_Ord & ~0x40);
+                do {
+                    offset = firstData+sector*32;
+                    memcpy(&ldir_entry, disk+offset, 32);
+                    if((ldir_entry.LDIR_Ord & ~0x40) != order--) {
+                        log(1, "WARNING: Wrong order of Long Directory Name! read: %d, must be: %d. Skipping sector\n", (ldir_entry.LDIR_Ord & 0x40), order);
+                        sector++;
+                        continue;
+                    }
+                    LFN = parseLDIRName(ldir_entry);
+                    sector++;
+
+                }
+                while(order != 0);
+
+                log(0, "Ldir name: %s, needed name: %s\n", LFN, name);
+                if(strcmp(LFN, name) == 0) {
+                    struct DirectoryFAT32 dir_entry;
+                    offset = firstData+sector*32;
+                    memcpy(&dir_entry, disk+offset, 32);
+                    log(0, "Found needed folder.\n");
+                    uint32_t cluster_number = dir_entry.DIR_FstClusHI;
+                    cluster_number <<= 16;
+                    cluster_number |= dir_entry.DIR_FstClusLO;
+                    log(0, "Cluster number: %d\n", cluster_number);
+                    free(LFN);
+                    return cluster_number;
+                }
+                free(LFN);
+
+
+            }
+        } else if(*(disk+offset + 11) == ATTR_DIRECTORY) {
+            if(*(disk+offset) != 0x0 || *(disk+offset) != 0xE5) {
+                struct DirectoryFAT32 dir_entry;
+                offset = firstData+sector*32;
+                memcpy(&dir_entry, disk+offset, 32);
+                log(0, "dir name: %s, needed name: %s\n", LFN, name);
+                parse_shortname(dir_entry.DIR_NAME);
+                if(strcmp(dir_entry.DIR_NAME, name) == 0) {
+                    log(0, "Found needed folder.\n");
+                    uint32_t cluster_number = dir_entry.DIR_FstClusHI;
+                    cluster_number <<= 16;
+                    cluster_number |= dir_entry.DIR_FstClusLO;
+                    log(0, "Cluster number: %d\n", cluster_number);
+                    free(LFN);
+                    return cluster_number;
+                }
+            }
+        }
+    }
+    return UINT32_MAX; //NOT FOUND
 }
 
 int main(int argc, char *argv[])
@@ -809,24 +912,23 @@ int main(int argc, char *argv[])
         fwrite(disk, 1, size, new_image);
         fclose(new_image);
         free(disk);
+        image = fopen(file_path, "rb");
     }
     log(0, "Image opened successfully!\n");
 
     uint8_t *disk = malloc(size);
 
-    int readed = fread(disk, 1, size, image);
-    if(readed != size) {
+    if(fread(disk, 1, size, image) != size) {
         log(0, "Error reading image! Creating new.\n");
         FILE *new_image = fopen(file_path, "wb");
-        uint8_t *disk = malloc(size);
         memset(disk, 0, size);
         fwrite(disk, 1, size, new_image);
         fclose(new_image);
+
     }   
     log(0, "Image readed successfully!\n");
 
     fclose(image);
-    image = fopen(file_path, "wb");
 
     uint32_t current_cluster = 0;
     uint8_t *current_folder;
@@ -838,7 +940,7 @@ int main(int argc, char *argv[])
     if(init(disk) == 0) is_initialized = 1;
 
     while(1) {
-        printf("/>");
+        printf("%s> ", current_folder);
         char input[128];
         fgets(input, 128, stdin);
         input[strcspn(input, "\n")] = '\0';
@@ -854,32 +956,68 @@ int main(int argc, char *argv[])
                 printf("Unknown disk format.\n");
                 continue;
             }
-            char *directory = strtok(NULL, " ");
+            char *directory = strtok(NULL, "");
+            char *full_path = strdup(directory); //not part of C standart lib (!!!)
+            if(!directory) continue;
+            if(directory[0] == '/' && !directory[1]) { //moving to root
+                current_cluster = 0;
+                current_folder = realloc(current_folder, 1);
+                current_folder[0] = '/';
+                continue;
+            }
+            if(directory[0] != '/') {
+                printf("Only absolute paths allowed!\n");
+                continue;
+            }
+            directory = strtok(directory, "/");
+            int new_cluster = 0;
+            do {
+                if(directory) {
+                    log(0, "directory: %s\n", directory);
+
+                    new_cluster = get_folder_cluster(disk, new_cluster, directory); //start search from root
+                    log(0, "new cluster: %d\n", new_cluster);
+                    if(new_cluster == UINT32_MAX) {
+                        printf("No such directory!\n");
+                        break;
+                    } else {
+                        current_cluster = new_cluster;
+                        current_folder = realloc(current_folder, strlen(full_path));
+                        current_folder = strdup(full_path);
+                    }
+                }
+                directory = strtok(NULL, "/");
+            } while(directory);
 
         } else if(strcmp(command, "format") == 0) {
             format(disk, size);
             is_initialized = 1;
         } else if(strcmp(command, "mkdir") == 0) {
             if(!is_initialized) {
-                printf("Unknown disk format.\n");
+                log(0, "Unknown disk format.\n");
                 continue;
             }
-            char *directory = strtok(NULL, " ");
+            log(0, "Creating folder at cluster: %d\n", current_cluster);
+            char *directory = strtok(NULL, "");
             mkdir(disk, directory, current_cluster, 0);
+            image = fopen(file_path, "wb");
             if(fwrite(disk, 1, size, image) != size) {
                 perror("Error writing image");
             }
+            fclose(image);
         } else if(strcmp(command, "touch") == 0) {
             if(!is_initialized) {
                 printf("Unknown disk format.\n");
                 continue;
             }
-            char *directory = strtok(NULL, " ");
-            printf("File name: %s\n", directory);
+            char *directory = strtok(NULL, "");
+            log(0, "File name: %s\n", directory);
             mkdir(disk, directory, current_cluster, 1);
+            image = fopen(file_path, "wb");
             if(fwrite(disk, 1, size, image) != size) {
                 perror("Error writing image");
             }
+            fclose(image);
         } else if(strcmp(command, "help") == 0) {
             print_help();
         } else if(strcmp(command, "quit") == 0) {
@@ -890,15 +1028,17 @@ int main(int argc, char *argv[])
         } else {
             print_help();
         }
+
     }
 
     free(current_folder);
 
+    image = fopen(file_path, "wb");
     if(fwrite(disk, 1, size, image) != size) {
         perror("Error writing image");
     }
-
     fclose(image);
+
     free(disk);
     return 0;
 }
