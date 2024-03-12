@@ -21,4 +21,5 @@ $ ./fat32-emulator -f fat32.disk
 * format - creates FAT32 filesystem inside the file.  
 * ls [path] - shows the files and directories inside a given directory, or in the current directory af a path is not specified.  
 * mkdir [name] - creates a directory with a given name in the current directory.  
-* touch [name] - creates a file with a given name in the current directory.  
+* touch [name] - creates a file with a given name in the current directory.
+* quit - Exits from emulator
