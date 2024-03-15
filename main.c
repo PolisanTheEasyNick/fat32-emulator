@@ -962,6 +962,7 @@ int main(int argc, char *argv[])
                 current_cluster = 0;
                 current_folder = realloc(current_folder, 1);
                 current_folder[0] = '/';
+                current_folder[1] = '\0';
                 continue;
             }
             if(directory[0] != '/') {
